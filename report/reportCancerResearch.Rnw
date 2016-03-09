@@ -1,0 +1,499 @@
+\documentclass[a4paper]{article}
+
+\usepackage{amsmath}
+\usepackage{amscd}
+\usepackage[T2A]{fontenc}
+\usepackage[tableposition=top]{caption}
+\usepackage{ifthen}
+\usepackage[utf8]{inputenc}
+\usepackage[english, russian]{babel}
+\usepackage[pdftex]{graphicx, epsfig}
+\usepackage{epstopdf}
+\usepackage{longtable,array}
+\usepackage[paperwidth=20.5cm,paperheight=29.7cm,width=18cm,height=26.5cm,top=24mm,left=14mm,headsep=11mm]{geometry}
+
+\begin{document}
+
+\title{Отчет}
+\author{Черткова Александра, Свичкарев Анатолий}
+\maketitle
+
+\tableofcontents
+
+\section{Построение отчета}
+Отчет строиться в два этапа.
+\begin{itemize}
+\item[-] С помощью пакета \textit{Sweave} файл \textit{Rnw}
+конвертируется в \textit{tex}
+\begin{verbatim}
+R CMD Sweave report_mexp.Rnw
+\end{verbatim}
+\item[-] С помощью \textit{pdflatex} получается \textit{pdf}
+\begin{verbatim}
+pdflatex --file-line-error-style --shell-escape report_mexp.tex
+\end{verbatim}
+\end{itemize}
+
+
+\section{Исходные данные}
+Для рассмотрения отбираются гены хозяйской клетки для которых:
+\begin{itemize}
+\item[-] экспрессия изменяется по крайней мере в два раза,
+\item[-] вероятностью дифференциальной экспрессии 95\% (P <= 0.05).
+\end{itemize}
+
+Загружаем библиотеки:
+<<echo=TRUE>>=
+library("ArrayExpress")
+@
+
+Загружаем предварительно скачанные данные из файлов:
+<<echo=TRUE>>=
+GEOaccession = "GSE15765"
+dataPath = file.path(getwd(), "data", GEOaccession)
+supportFilesPrefix = "E-GEOD-15765"
+
+mexp886 = list()
+mexp886$path = dataPath
+mexp886$rawFiles = list.files(dataPath, pattern="\\.CEL$")
+mexp886$rawArchive = paste(supportFilesPrefix, ".raw.1.zip", sep="")
+mexp886$processedFiles = paste(supportFilesPrefix, "-processed-data-1343526943.txt", sep="")
+mexp886$processedArchive = paste(supportFilesPrefix, ".processed.1.zip", sep="")
+mexp886$sdrf = paste(supportFilesPrefix, ".sdrf.txt", sep="")
+mexp886$idf = paste(supportFilesPrefix, ".idf.txt", sep="")
+mexp886$adf = "A-AFFY-37.adf.txt"
+@
+
+Создаем объект AffyBatch:
+<<echo=TRUE>>=
+aeset = ae2bioc(mageFiles = mexp886)
+AEset = aeset
+AEset
+@
+
+Смотрим на имена колонок:
+<<echo=TRUE>>=
+colnames(pData(AEset))
+fac = colnames(pData(AEset))[grep("Factor", colnames(pData(AEset)))]
+fac
+@
+Будем изучать knock out.
+
+\section{Проверка качества данных}
+
+Нам потребуются библиотеки:
+<<echo=TRUE>>=
+library("affyQCReport")
+library("simpleaffy")
+@
+
+Проверяем есть ли выбросы:
+\begin{figure}[htbp]
+\begin{center}
+<<echo=TRUE,fig=TRUE,width=6>>=
+saqc=qc(AEset)
+plot(saqc)
+@
+\caption{QC plot}
+\label{fig:qcplot}
+\end{center}
+\end{figure}
+
+Строим модель данных:
+<<echo=TRUE, label="bughere">>=
+library("affyPLM")
+dataPLM = fitPLM(AEset)
+@
+
+Проверяем есть ли выбросы по NUSE:
+\begin{figure}[htbp]
+\begin{center}
+<<echo=TRUE,fig=TRUE,width=6>>=
+boxplot(dataPLM, main="NUSE", ylim = c(0.95, 1.22), 
+outline = FALSE, col="lightblue", las=3, whisklty=0, staplelty=0)
+@
+\caption{NUSE plot}
+\label{fig:nuseplot}
+\end{center}
+\end{figure}
+
+Проверяем есть ли выбросы по RLE:
+\begin{figure}[htbp]
+\begin{center}
+<<echo=TRUE,fig=TRUE,width=6>>=
+Mbox(dataPLM, main="RLE", ylim = c(-0.4, 0.4), 
+outline = FALSE, col="mistyrose", las=3, whisklty=0, staplelty=0)
+@
+\caption{RLE plot}
+\label{fig:rleplot}
+\end{center}
+\end{figure}
+
+<<echo=TRUE>>=
+library("arrayQualityMetrics")
+arrayQualityMetrics(expressionset = AEset, outdir = "QAraw",
+force = TRUE, do.logtransform = TRUE, intgroup = fac)
+@
+
+Отчет содержится в \textbf{QMreport.html} в поддиректории \textbf{QAraw}. Диагностические графики в виде изображений .png сохраняются в поддиректории \textbf{QAraw}.
+
+\section{Удаление фона, нормализация и фильтрация}
+
+Применяем RMA с настройками по умолчанию
+<<echo=TRUE>>=
+rAEset = rma(AEset)
+@
+
+Благодаря \textbf{RMA}, которая обобщает пробы, объект \textbf{rAEset} имеет стандартный для одноцветных массивов тип \textbf{ExpressionSet}.
+
+Проверим качество после нормализации:
+<<echo=TRUE>>=
+arrayQualityMetrics(expressionset = rAEset, outdir = "QAnorm",
+force = TRUE, intgroup = fac)
+@
+
+Исключаем массив \textnumero 6 и проводим ренормализацию.
+<<echo=TRUE>>=
+cAEset = rma(AEset[, -6])
+@
+
+\section{Дифференциальная экспрессия}
+
+Будем использовать методы из:
+<<echo=TRUE>>=
+library("limma")
+@
+
+Выбор групп для рассмотрения. Мы собираемся использовать фактор генотип для сравнения мышей ataxin -/- (KO) и мышей дикого типа (WT):
+<<echo=TRUE>>=
+groups = pData(cAEset)[, fac]
+groups[groups == "wild type"] = "WT"
+groups[groups == "ataxin1 knock out"] = "KO"
+groups
+@
+
+Строим фактор
+<<echo=TRUE>>=
+f = factor(groups)
+f
+@
+
+Фактор fac с группами WT and KO будет использован для создания матрицы \textbf{design}.
+
+Матрица design -- какой образец RNA был применен к какому массиву:
+<<echo=TRUE>>=
+design = model.matrix(~ 0 + f)
+colnames(design)=sub("f", "", colnames(design))
+design
+@
+
+Строим матрицу контрастов:
+<<echo=TRUE>>=
+conmat <- makeContrasts(KO-WT, levels = design)
+colnames(conmat) <- c("KOvsWT")
+conmat
+@
+
+<<echo=TRUE>>=
+fit = lmFit(cAEset, design)
+fitc <- contrasts.fit(fit, conmat)
+fit2 = eBayes(fitc)
+@
+
+Смотрим на дифференциальную экспрессию:
+\begin{figure}[htbp]
+\begin{center}
+<<echo=TRUE,fig=TRUE,width=6>>=
+volcanoplot(fit2, coef="KOvsWT", highlight=15)
+@
+\caption{Volcano plot}
+\label{fig:vplot6}
+\end{center}
+\end{figure}
+
+Отрицательный log10 от p-value по оси y. Точки с низким p-values (очень значимые) в верхней части графика. По оси x отложен log изменения между двумя условиями. Увеличение и уменьшение приводит к одинаковому отступу от центра. Две области: сверху слева и справа.
+
+Таблица дифференциально экспрессирующихся генов. Функция \textbf{topTable}, выберем только гены с $p-value < 0.001$.
+(\textbf{?topTable}).
+<<echo=TRUE,label="topTable">>=
+result = topTable(fit2, coef = "KOvsWT", adjust = "BH", number =nrow(cAEset))
+topgenes = result[result[, "P.Value"] < 0.001, ]
+ngenes=dim(topgenes)[1]
+ngenes
+@
+
+Up и down гены:
+<<echo=TRUE,label="topTableUpDown">>=
+topupgenes = topgenes[which(topgenes$logFC > 0), ]
+nupgenes=dim(topupgenes)[1]
+nupgenes
+
+topdowngenes = topgenes[which(topgenes$logFC < 0), ]
+ndowngenes=dim(topdowngenes)[1]
+ndowngenes
+@
+
+<<echo=TRUE>>=
+library(xtable)
+restable <- data.frame(up=c(nupgenes), down=c(ndowngenes), tot=c(ngenes))
+rownames(restable) <- c("")
+colnames(restable) <- c("N up", "N down", "N tot")
+@
+
+<<echo=TRUE,results=tex>>=
+xtable(restable, caption = "Resulting numbers of genes", label = "numtab")
+@
+
+\section{Иерархическая кластеризация}
+
+Цвета от зеленого к красному:
+<<echo=TRUE>>=
+library(amap)
+heatcol<-colorRampPalette(c("Green", "Red"))(32)
+@
+
+<<echo=TRUE,results=hide>>=
+ID <- rownames(topgenes)
+fAEset=cAEset[ID, ]
+@
+
+Матрица:
+<<echo=TRUE>>=
+m = exprs(fAEset)
+colnames(m) = 1:9
+@
+
+Присваиваем цвета группам WT и KO:
+<<echo=TRUE>>=
+colours = c("lightgreen", "mediumpurple")
+col = colours[f]
+@
+
+\begin{figure}[htbp]
+\begin{center}
+<<echo=TRUE,fig=TRUE,width=6>>=
+heatmap(m, ColSideColors = col, margin = c(5, 8))
+@
+\caption{Heatmap}
+\label{fig:hmplot}
+\end{center}
+\end{figure}
+
+Дендрограмма может быть получена:
+\begin{figure}[htbp]
+\begin{center}
+<<echo=TRUE,fig=TRUE,width=6>>=
+plot(hclust(dist(m)))
+@
+\caption{Dendro}
+\label{fig:dgplot}
+\end{center}
+\end{figure}
+
+Иерархическая кластеризация проводиться с помощью коэффициента корреляции Пирсона:
+<<echo=TRUE>>=
+clust.genes<-hcluster(x=m, method="pearson", link="average")
+clust.arrays<-hcluster(x=t(m), method="pearson", link="average")
+@
+
+\begin{figure}[htbp]
+\begin{center}
+<<echo=TRUE,fig=TRUE,width=6>>=
+heatmap(x=as.matrix(m), Rowv=as.dendrogram(clust.genes), 
+Colv=as.dendrogram(clust.arrays), col=heatcol, margin = c(5, 8))
+@
+\caption{Heatmap}
+\label{fig:hplot}
+\end{center}
+\end{figure}
+
+\section{Обогащенность генов (GSEA)}
+
+Есть ли в дифференциальная экспрессия генов из какого-то биологического пути или какого-то биологического процесса. Использует все гены из эксперимента (``no cut-off''). Подходит для парного изучения (e.g. Disease versus control). Требует обощенного значения, что может вызывать трудности. Предполагается, что сильно меняющиеся гены более важны, а это не всегда так. Сравнивает только две группы.
+
+Пакет GSEABase. Необходимо загрузить пакет GSEABase и аннотацию для cAEset.
+<<echo=TRUE>>=
+library("GSEABase")
+annotation(cAEset)
+library("moe430a.db")
+@
+
+Соберем все идентификаторы генов в наборы в соответствии с их участием в путях из \textbf{KEGG}, функция \textbf{GeneSetCollection}. Матрица инциденций показывает присутствие гена в парах наборов.
+<<echo=TRUE>>=
+gsc = GeneSetCollection(cAEset, setType = KEGGCollection())
+Am = incidence(gsc)
+dim(Am)
+@
+
+Оставим в \textbf{nsF} типа \textbf{ExpressionSet} только гены из пути \textbf{KEGG}.
+<<echo=TRUE>>=
+nsF = cAEset[colnames(Am), ]
+@
+
+Вычисли t-статистику для генов в \textbf{nsF} с помощью \textbf{rowttests} из \textbf{genefilter}.
+<<echo=TRUE>>=
+library("genefilter")
+rtt = rowttests(nsF, fac)
+rttStat = rtt$statistic
+@
+
+Визуализация. Выберем из Am пути с не менее чем 10 генами.
+<<echo=TRUE>>=
+selectedRows = (rowSums(Am) > 10)
+Am2 = Am[selectedRows, ]
+@
+
+Скорректируем t-статистику
+<<echo=TRUE>>=
+tA = as.vector(Am2 %*% rttStat)
+tAadj = tA/sqrt(rowSums(Am2))
+names(tA) = names(tAadj) = rownames(Am2)
+@
+
+Найдем путь с наибольшей разницей между KO и WT
+<<echo=TRUE>>=
+library(KEGG.db)
+smPW = which(tAadj == min(tAadj))
+pwName = KEGGPATHID2NAME[[names(smPW)]]
+pwName
+@
+
+Построим heatmap для генов из этого пути функцией KEGG2heatmap
+\begin{figure}[htbp]
+\begin{center}
+<<echo=TRUE,fig=TRUE,width=6>>=
+par(mfrow=c(1,1))
+KEGG2heatmap(names(smPW), nsF, "moe430a", col = colorRampPalette(c("white", "darkblue"))(256), ColSideColors = col, margin = c(5, 8))
+@
+\caption{KEGG2heatmap}
+\label{fig:kgplot}
+\end{center}
+\end{figure}
+
+\section{Функциональный анализ}
+
+<<echo=TRUE>>=
+library("GOstats")
+library("Rgraphviz")
+library("hgu133plus2.db")
+@
+
+Рассмотрим экспериментальный метод, который подразделяет набор генов на классы, например, дифференциально экспрессирующиеся и нет. Этот набор генов будем называть gene universe. Далее, для отдельного термина из GO, этот набор может быть подразделен на те гены, что относятся к в этому термину, и те, что нет. Используем метафору урны, в которой находятся гены -- шары. Относящиеся к термину из GO -- черные, остальные белые. Высока ли частота черных шаров среди дифференциально экспрессирующихся генов или она такая же как в gene universe? Если частота выше, то можно считать, что есть связь между термином из GO и списком генов.
+
+С помощью библиотеки с аннотациями получим идентификаторы генов на чипе:
+<<echo=TRUE>>=
+affyUniverse = featureNames(cAEset)
+uniId = moe430aENTREZID[affyUniverse]
+entrezUniverse = unique(as.character(uniId))
+@
+
+Получим также идентификаторы дифференциально экспрессирующихся генов.
+<<echo=TRUE>>=
+affysub=ID
+uniIdsub = moe430aENTREZID[affysub]
+entrezsub = unique(as.character(uniIdsub))
+@
+
+Построим гипергеометрическое распределение:
+<<echo=TRUE>>=
+library("GOstats")
+params = new("GOHyperGParams",
+geneIds=entrezsub,
+universeGeneIds=entrezUniverse,
+annotation="moe430a",
+ontology="BP",
+pvalueCutoff=0.05,
+conditional=FALSE,
+testDirection="over")
+mfhyper = hyperGTest(params)
+@
+
+Сводные данные теста:
+<<echo=TRUE>>=
+mfhyper
+@
+
+\begin{figure}[htbp]
+\begin{center}
+<<echo=TRUE,fig=TRUE,width=6>>=
+hist(pvalues(mfhyper), breaks=50, col="mistyrose")
+@
+\label{fig:hyplot6}
+\end{center}
+\end{figure}
+Пик около нуля показывает, что существуют категории, обогащенные сильнее, чем можно было бы получить случайным образом.
+
+DAG протестированных терминов из GO.
+<<echo=TRUE>>=
+gdg <- goDag(mfhyper)
+@
+
+\begin{figure}[htbp]
+\begin{center}
+<<echo=TRUE,fig=TRUE,width=6>>=
+plot(gdg)
+@
+\label{fig:gdgplot6}
+\end{center}
+\end{figure}
+
+<<echo=TRUE,results=tex,label="ortab">>=
+xtable(summary(mfhyper, pvalue=0.05, categorySize=3000),
+ caption = "Overrepresented terms", label = "ortab")
+@
+
+
+\section{Пути из базы Reactome или GO}
+
+Построим список с идентификаторами дифференциально экспрессирующихся генов для временных точек.
+
+<<echo=TRUE>>=
+library("ReactomePA")
+library("GO.db")
+library("clusterProfiler")
+@
+
+Проверим динамику обогащения. Построим список с идентификаторами дифференциально экспрессирующихся генов для временных точек.
+<<echo=TRUE,label="gcDyn">>=
+gcDyn <- list()
+gcDyn$h0 <- entrezsub
+@
+
+Для каждого элемента списка -- <<кластера>> -- находим обогащенные пути.
+<<echo=TRUE,label="dynTableGODB">>=
+dynTableGODB <- compareCluster(gcDyn, fun="groupGO", organism = "mouse", readable=TRUE)
+@
+
+Построим таблицу.
+<<echo=TRUE,results=tex,label="srpa">>=
+srpa <- summary(dynTableGODB)
+srpa$geneID=gsub("/"," ",srpa$geneID)
+print(
+xtable(srpa, caption = "Enriched by GO",
+ label = "dyntabReactomePA"),
+ tabular.environment = "longtable", floating = "FALSE", align="rllp\\{2cm\\}llrlp\\{2cm\\}r")
+@
+
+Построим график.
+\begin{figure}[htbp]
+\begin{center}
+<<echo=TRUE,fig=TRUE,width=9>>=
+plot(dynTableGODB, type="dot")
+@
+\label{fig:dynplotGODB}
+\end{center}
+\end{figure}
+
+\section{Выводы}
+
+\begin{enumerate}
+\item Несмотря на расхождение количественных результатов с исходной статьей, полученные результаты качественно совпадают в следующих пунктах:
+\begin{itemize}
+\item[-] Число дифференциально экспрессирующихся генов растет со временем.
+\item[-] 
+\end{itemize}
+
+\end{enumerate}
+
+\end{document}
+
