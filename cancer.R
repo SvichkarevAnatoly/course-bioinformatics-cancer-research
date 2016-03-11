@@ -27,13 +27,38 @@ saqc=qc(AEset)
 plot(saqc)
 
 library("affyPLM")
-dataPLM = fitPLM(AEset)
+# dataPLM = fitPLM(AEset)
+dataPLM = fitProbeLevelModel(AEset)
 
-boxplot(dataPLM, main="NUSE", ylim = c(0.95, 1.22), outline = FALSE, col="lightblue", las=3, whisklty=0, staplelty=0)
+library("oligo")
+oligo::NUSE(dataPLM) # посмотреть мануал для остальных параметров
+oligo::RLE(dataPLM)
 
-# изменил масштаб, был -0.4; 0.4
-Mbox(dataPLM, main="RLE", ylim = c(-0.8, 0.8), outline = FALSE, col="mistyrose", las=3, whisklty=0, staplelty=0)
+cAEset = oligo::rma(AEset)
 
-library("arrayQualityMetrics")
-arrayQualityMetrics(expressionset = AEset, outdir = "QAraw", force = TRUE, do.logtransform = TRUE, intgroup = fac)
+groups = pData(AEset)[, fac] # убрать шум
+groups[groups == "hepatocellular carcinoma"] = "HC"
+groups[groups == "combined hepatocellular carcinoma and cholangiocarcinoma"] = "CHCAC"
+groups[groups == "cholangiocarcinoma"] = "C"
+groups
+
+f = factor(groups)
+f
+
+design = model.matrix(~ 0 + f)
+colnames(design)=sub("f", "", colnames(design))
+design
+
+library(limma)
+conmat <- makeContrasts(HC-CHCAC, HC-C, CHCAC-C, levels = design)
+colnames(conmat) <- c("HCvsCHCAC", "HCvsC", "CHCACvsC")
+conmat
+
+fit = lmFit(cAEset, design)
+fitc <- contrasts.fit(fit, conmat)
+fit2 = eBayes(fitc)
+
+volcanoplot(fit2, coef="HCvsCHCAC", highlight=15)
+volcanoplot(fit2, coef="HCvsC",     highlight=15)
+volcanoplot(fit2, coef="CHCACvsC", highlight=15)
 
